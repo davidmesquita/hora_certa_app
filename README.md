@@ -87,6 +87,20 @@ npx supabase test db
 - Exclusão confirmada de uma rota apaga observações e resultados associados por `ON DELETE CASCADE`. “Apagar meus registros” remove todas as rotas do usuário e seus dados dependentes, mas mantém sua conta Supabase.
 - Exportação JSON inclui as rotas (inclusive sem observações) e observações carregadas; o histórico também pode ser exportado/importado em CSV, mantendo a categoria da rota e a categoria da corrida separadas. CSV importado é tratado como dado manual e arquivos que tentem declarar `authorized_api` ou `demo` são recusados.
 
+## Previsão estatística
+
+O motor em `src/forecast.ts` analisa grupos isolados por rota, plataforma e categoria (comparada sem diferença de maiúsculas/minúsculas). Usa somente observações válidas, de fonte `manual` ou `authorized_api`, ocorridas estritamente antes do instante da análise e dentro dos últimos 180 dias. `demo`, registros inválidos e registros no instante de corte ou no futuro são descartados. Horários e dias da semana são agrupados no fuso `America/Fortaleza`, em janelas fixas de 30 minutos.
+
+Uma faixa só é avaliável com pelo menos 5 observações em 3 datas locais distintas; o baseline exige 8 observações em 5 dias distintos. O baseline é a mediana geral do grupo no período de 180 dias. Só são destacadas faixas com mediana abaixo do baseline; se a faixa tiver ao menos 3 observações nos últimos 60 dias, a mediana recente também precisa estar abaixo do baseline. Quando há esse recorte recente, a ordenação usa a média simples entre mediana histórica e recente. Cada faixa exibe P25, mediana, P75, IQR (P75 − P25), quantidade, dias distintos, mediana da própria faixa nos últimos 60 dias e última observação. O painel também mostra mediana geral e recente do grupo, além do histórico gráfico (até 60 pontos mais recentes).
+
+Confiança baixa é o nível padrão para uma amostra que passou os mínimos, ou para faixa com IQR/mediana acima dos critérios superiores. Média requer ≥10 observações, ≥6 dias distintos, idade da última amostra ≤45 dias e IQR/mediana ≤30%. Alta requer ≥20 observações, ≥12 dias, amostra ≤21 dias e IQR/mediana ≤18%. Um grupo sem atualização há mais de 90 dias é marcado desatualizado e não recebe recomendação. Esses limites são heurísticas descritivas, não garantem desempenho preditivo; não há validação de acurácia de mercado nesta versão.
+
+Uber e 99 são sempre analisados separadamente. Não há comparação direta entre plataformas porque o app ainda não tem um mapeamento autorizado e validado de equivalência entre as categorias dos dois serviços.
+
+### Exemplo didático fictício
+
+**Todos os números abaixo são fictícios e servem apenas para explicar a conta. Não são preços observados, cotação atual ou resultado do usuário.** Suponha uma faixa de segunda-feira às 08:00 com cinco registros `[8, 9, 10, 10, 12]` em cinco segundas-feiras distintas. Pelo quantil interpolado usado no motor: P25 = R$ 9,00, mediana = R$ 10,00 e P75 = R$ 10,00; portanto IQR = R$ 1,00. Se, em dez observações hipotéticas do grupo, a mediana geral fosse R$ 13,00, essa faixa ficaria abaixo do baseline e poderia ser destacada com confiança baixa (amostra de cinco pontos). O painel ainda ressalta que o resultado não é cotação e não garante preço futuro menor.
+
 ## Testes, lint e build
 
 ```sh
@@ -97,7 +111,7 @@ npm run preview
 npm audit
 ```
 
-`npm test` executa os testes de domínio/interface e uma suíte de autorização que carrega a migração real em PGlite, cria papéis PostgreSQL (`anon`/`authenticated`) e testa isolamento entre duas identidades, manipulação de `user_id`, restrições de origem/preço, CRUD próprio, fontes `demo` e a projeção sem dados demonstrativos. O arquivo `supabase/tests/rls.test.sql` contém também a suíte pgTAP para `npx supabase test db`.
+`npm test` executa os testes de domínio/interface, a suíte de autorização e testes estatísticos com conjuntos controlados: mediana/quartis, baseline, amostra insuficiente, histórico desatualizado, separação de categoria/plataforma, exclusão de `demo`/inválidos e corte temporal. A suíte de autorização carrega a migração real em PGlite, cria papéis PostgreSQL (`anon`/`authenticated`) e testa isolamento entre duas identidades, manipulação de `user_id`, restrições de origem/preço e CRUD próprio. O arquivo `supabase/tests/rls.test.sql` contém também a suíte pgTAP para `npx supabase test db`.
 
 Os testes PGlite verificam a semântica das políticas SQL em PostgreSQL, com `auth.uid()` simulado pelo claim JWT do Supabase. Eles não verificam um projeto hospedado, o fluxo real de emissão de JWT/e-mail, configuração do Dashboard ou implantação remota. Execute `npx supabase test db` com Docker e, depois, testes no projeto de destino antes de considerar sua configuração remota validada.
 
@@ -105,9 +119,9 @@ Os testes PGlite verificam a semântica das políticas SQL em PostgreSQL, com `a
 
 O projeto não requer Edge Functions, armazenamento de arquivos nem processamento contínuo. O plano Free do Supabase pode servir para uso pessoal dentro das quotas vigentes; projetos gratuitos inativos podem ser pausados, e exceder limites pode restringir o serviço. Confira [preços e quotas atuais](https://supabase.com/pricing) e [regras de pausa do plano Free](https://supabase.com/docs/guides/platform/free-project-pausing) antes de colocar dados importantes. O app não promete backup, disponibilidade, sincronização offline ou recuperação de conta além dos recursos configurados no Supabase.
 
-## Escopo não implementado
+## Escopo ainda não implementado
 
-- Cálculo ou exibição de previsões.
 - Integração autorizada com plataformas de corrida.
 - Modo demonstrativo e inserção de dados `demo` pelo cliente.
+- Comparação direta entre plataformas/categorias.
 - Exclusão da própria conta de autenticação.
