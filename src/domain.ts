@@ -1,19 +1,20 @@
 import { z } from 'zod'
 
 export const routeSchema = z.object({
-  id: z.string().min(1),
+  id: z.string().uuid(),
   origin: z.string().trim().min(3, 'Informe a origem (mínimo de 3 caracteres).').max(160),
   destination: z.string().trim().min(3, 'Informe o destino (mínimo de 3 caracteres).').max(160),
   category: z.string().trim().max(80).optional().default(''),
 })
 export const observationSchema = z.object({
-  id: z.string().min(1), routeId: z.string().min(1), platform: z.enum(['Uber', '99']),
+  id: z.string().uuid(), routeId: z.string().uuid(), platform: z.enum(['Uber', '99']),
   category: z.string().trim().max(80).optional().default(''),
   price: z.number().finite().positive('Informe um preço maior que zero.').max(100000),
-  observedAt: z.string().datetime({ offset: true }), source: z.literal('manual').default('manual'),
+  observedAt: z.string().datetime({ offset: true }), sourceType: z.enum(['manual', 'authorized_api', 'demo']).default('manual'),
+  validityStatus: z.enum(['valid', 'invalid', 'needs_review']).default('valid'),
 })
 export const routeInputSchema = routeSchema.omit({ id: true })
-export const observationInputSchema = observationSchema.omit({ id: true, source: true })
+export const observationInputSchema = observationSchema.omit({ id: true, sourceType: true, validityStatus: true })
 export type Route = z.infer<typeof routeSchema>
 export type Observation = z.infer<typeof observationSchema>
 export type RouteInput = z.input<typeof routeInputSchema>
@@ -21,18 +22,6 @@ export type ObservationInput = z.input<typeof observationInputSchema>
 export type AppData = { routes: Route[]; observations: Observation[] }
 
 export const emptyData: AppData = { routes: [], observations: [] }
-export function loadData(): AppData {
-  try {
-    const value: unknown = JSON.parse(localStorage.getItem('precocerto:v1') ?? 'null')
-    if (!value || typeof value !== 'object') return emptyData
-    const candidate = value as { routes?: unknown; observations?: unknown }
-    const routes = z.array(routeSchema).safeParse(candidate.routes ?? [])
-    const observations = z.array(observationSchema).safeParse(candidate.observations ?? [])
-    if (!routes.success || !observations.success) return emptyData
-    return { routes: routes.data, observations: observations.data }
-  } catch { return emptyData }
-}
-export function saveData(data: AppData): void { localStorage.setItem('precocerto:v1', JSON.stringify(data)) }
 export function formatPrice(price: number): string { return new Intl.NumberFormat('pt-BR', { style: 'currency', currency: 'BRL' }).format(price) }
 export function formatFortaleza(date: string, options?: Intl.DateTimeFormatOptions): string {
   return new Intl.DateTimeFormat('pt-BR', { timeZone: 'America/Fortaleza', ...options }).format(new Date(date))
@@ -47,9 +36,9 @@ export function fromFortalezaIso(iso: string): string {
 }
 const csvCell = (value: string | number) => `"${String(value).replaceAll('"', '""')}"`
 export function exportCsv(data: AppData): string {
-  const rows = [['origem', 'destino', 'plataforma', 'categoria', 'preco', 'observado_em'], ...data.observations.flatMap((item) => {
+  const rows = [['origem', 'destino', 'categoria_rota', 'plataforma', 'categoria', 'preco', 'observado_em', 'source_type', 'validity_status'], ...data.observations.flatMap((item) => {
     const route = data.routes.find((r) => r.id === item.routeId)
-    return route ? [[route.origin, route.destination, item.platform, item.category, item.price, item.observedAt]] : []
+    return route ? [[route.origin, route.destination, route.category, item.platform, item.category, item.price, item.observedAt, item.sourceType, item.validityStatus]] : []
   })]
   return '\uFEFF' + rows.map((row) => row.map(csvCell).join(',')).join('\r\n')
 }
@@ -70,16 +59,24 @@ export function importCsv(csv: string, existing: AppData): AppData {
   if (lines.length < 2 || lines.length > 10001) throw new Error('O CSV precisa conter cabeçalho e até 10.000 registros.')
   const header = parseCsvRow(lines[0]!).map((v) => v.trim().toLowerCase())
   const expected = ['origem', 'destino', 'plataforma', 'categoria', 'preco', 'observado_em']
-  if (header.join('|') !== expected.join('|')) throw new Error(`Cabeçalho inválido. Use: ${expected.join(', ')}`)
+  const legacyMetadataHeader = [...expected, 'source_type', 'validity_status']
+  const currentHeader = ['origem', 'destino', 'categoria_rota', 'plataforma', 'categoria', 'preco', 'observado_em', 'source_type', 'validity_status']
+  const hasCurrentFormat = header.join('|') === currentHeader.join('|')
+  const hasLegacyMetadata = header.join('|') === legacyMetadataHeader.join('|')
+  const isLegacy = header.join('|') === expected.join('|')
+  if (!hasCurrentFormat && !hasLegacyMetadata && !isLegacy) throw new Error(`Cabeçalho inválido. Use: ${currentHeader.join(', ')}`)
   const routes = [...existing.routes]; const observations = [...existing.observations]
   for (const [index, line] of lines.slice(1).entries()) {
     if (!line.trim()) continue
     const row = parseCsvRow(line)
-    if (row.length !== 6) throw new Error(`Linha ${index + 2}: esperado 6 campos.`)
-    const [origin, destination, platform, category, priceText, observedAt] = row as [string, string, string, string, string, string]
-    const route = routes.find((r) => r.origin === origin && r.destination === destination && r.category === category) ?? routeSchema.parse({ id: crypto.randomUUID(), origin, destination, category })
+    if (row.length !== (hasCurrentFormat ? 9 : hasLegacyMetadata ? 8 : 6)) throw new Error(`Linha ${index + 2}: quantidade de campos inválida.`)
+    const [origin, destination, routeCategory, platform, category, priceText, observedAt, sourceType, validityStatus] = hasCurrentFormat
+      ? row
+      : [row[0], row[1], '', row[2], row[3], row[4], row[5], row[6], row[7]]
+    if ((hasCurrentFormat || hasLegacyMetadata) && (sourceType !== 'manual' || validityStatus !== 'valid')) throw new Error(`Linha ${index + 2}: a importação aceita apenas registros manuais válidos.`)
+    const route = routes.find((r) => r.origin === origin && r.destination === destination && r.category === routeCategory) ?? routeSchema.parse({ id: crypto.randomUUID(), origin, destination, category: routeCategory })
     if (!routes.some((r) => r.id === route.id)) routes.push(route)
-    const parsed = observationSchema.parse({ id: crypto.randomUUID(), routeId: route.id, platform, category, price: Number(priceText), observedAt, source: 'manual' })
+    const parsed = observationSchema.parse({ id: crypto.randomUUID(), routeId: route.id, platform, category, price: Number(priceText), observedAt, sourceType: 'manual', validityStatus: 'valid' })
     observations.push(parsed)
   }
   return { routes, observations }
